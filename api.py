@@ -342,32 +342,92 @@ ALBUM_ERA = {
 }
 
 # ── Load resources ────────────────────────────────────────────────────────────
+# text_agent = None
+# audio_agent = None
+# early_fusion_agent = None
+
+# try:
+#     from src.text_agent import TextAgent
+#     from src.audio_agent import AudioAgent
+    
+#     t_path = BASE / "models" / "text_agent.pkl"
+#     a_path = BASE / "models" / "audio_agent.pkl"
+#     if t_path.exists(): text_agent = TextAgent.load(str(t_path))
+#     if a_path.exists(): audio_agent = AudioAgent.load(str(a_path))
+#     print(f"[api] Agents Active: Text({text_agent is not None}) Audio({audio_agent is not None})")
+# except Exception as e:
+#     print(f"[api] Agent load failed: {e}")
+
+# dataset: pd.DataFrame | None = None
+# try:
+#     primary_path = BASE / "TaylorSwiftEras" / "Data" / "Final" / "taylor_merged_df.csv"
+#     dataset = pd.read_csv(primary_path)
+#     dataset["era"] = dataset["album_name"].map(ALBUM_ERA).fillna("Unknown")
+#     dataset["lyrics"] = dataset["lyric"]
+# except Exception as e:
+#     print(f"[api] Dataset load failed: {e}")
+
 text_agent = None
 audio_agent = None
 debate_orchestrator: DebateOrchestrator | None = None
 
-from src.text_agent import TextAgent
-from src.audio_agent import AudioAgent
+text_agent = None
+audio_agent = None
+early_fusion_agent = None
 
-t_path = BASE / "models" / "text_agent.pkl"
-a_path = BASE / "models" / "audio_agent.pkl"
-if t_path.exists():
-    try:
-        text_agent = TextAgent.load(str(t_path))
-    except Exception as e:
-        print(f"[api] TextAgent load failed: {e}")
-if a_path.exists():
-    try:
-        audio_agent = AudioAgent.load(str(a_path))
-    except Exception as e:
-        print(f"[api] AudioAgent load failed: {e}")
-print(f"[api] Agents Active: Text({text_agent is not None}) Audio({audio_agent is not None})")
+# ── Load agents ───────────────────────────────────────────────────────────────
+try:
+    from src.text_agent import TextAgent
+    from src.audio_agent import AudioAgent
 
+    try:
+        from src.early_fusion_agent import EarlyFusionAgent
+    except Exception as e:
+        EarlyFusionAgent = None
+        print(f"[api] EarlyFusionAgent import failed: {e}")
+
+    t_path = BASE / "models" / "text_agent.pkl"
+    a_path = BASE / "models" / "audio_agent.pkl"
+    e_path = BASE / "models" / "early_fusion_agent.pkl"
+
+    if t_path.exists():
+        try:
+            text_agent = TextAgent.load(str(t_path))
+        except Exception as e:
+            print(f"[api] TextAgent load failed: {e}")
+
+    if a_path.exists():
+        try:
+            audio_agent = AudioAgent.load(str(a_path))
+        except Exception as e:
+            print(f"[api] AudioAgent load failed: {e}")
+
+    if EarlyFusionAgent is not None and e_path.exists():
+        try:
+            early_fusion_agent = EarlyFusionAgent.load(str(e_path))
+        except Exception as e:
+            print(f"[api] EarlyFusionAgent load failed: {e}")
+
+    print(
+        f"[api] Agents Active: "
+        f"Text({text_agent is not None}) "
+        f"Audio({audio_agent is not None}) "
+        f"EarlyFusion({early_fusion_agent is not None})"
+    )
+
+except Exception as e:
+    print(f"[api] Agent load failed: {e}")
+
+
+# ── Load fusion model + evaluation metrics ───────────────────────────────────
 late_fusion_model = load_model(str(BASE / "model.pkl"))
-early_fusion_model = None
+early_fusion_model = early_fusion_agent
 eval_metrics = load_eval_metrics(BASE)
 
+
+# ── Load local dataset ────────────────────────────────────────────────────────
 dataset: pd.DataFrame | None = None
+
 try:
     primary_path = BASE / "TaylorSwiftEras" / "Data" / "Final" / "taylor_merged_df.csv"
     dataset = pd.read_csv(primary_path)
@@ -376,16 +436,55 @@ try:
 except Exception as e:
     print(f"[api] Dataset load failed: {e}")
 
+
+# ── Initialize debate orchestrator ────────────────────────────────────────────
 if text_agent is not None and audio_agent is not None:
     debate_orchestrator = DebateOrchestrator(
         text_agent=text_agent,
         audio_agent=audio_agent,
-        late_fusion_model=late_fusion_model if getattr(late_fusion_model, "fusion_type", None) == "late" else None,
+        late_fusion_model=late_fusion_model
+        if getattr(late_fusion_model, "fusion_type", None) == "late"
+        else None,
         early_fusion_model=early_fusion_model,
         eval_metrics=eval_metrics,
         eras_meta=ERAS_META,
     )
     print("[api] DebateOrchestrator (LangGraph) initialized")
+
+
+# ── Live API collectors fallback ──────────────────────────────────────────────
+spotify_collector = None
+genius_collector = None
+
+try:
+    from src.spotify_collector import SpotifyCollector
+
+    sp_id = os.getenv("SPOTIFY_API_ID")
+    sp_secret = os.getenv("SPOTIFY_API_TOKEN")
+
+    if sp_id and sp_secret:
+        spotify_collector = SpotifyCollector(sp_id, sp_secret)
+        print("[api] SpotifyCollector ready")
+    else:
+        print("[api] Spotify keys missing — live audio lookup disabled")
+
+except Exception as e:
+    print(f"[api] SpotifyCollector init failed: {e}")
+
+
+try:
+    from src.genius_collector import GeniusCollector
+
+    genius_token = os.getenv("GENIUS_API_TOKEN")
+
+    if genius_token:
+        genius_collector = GeniusCollector(genius_token)
+        print("[api] GeniusCollector ready")
+    else:
+        print("[api] Genius key missing — live lyrics lookup disabled")
+
+except Exception as e:
+    print(f"[api] GeniusCollector init failed: {e}")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="eralyzer API")
@@ -396,20 +495,22 @@ class DebateRequest(BaseModel):
     artist: str = "Taylor Swift"
     fusion: str = "late"
 
-
 def find_song(title: str) -> dict | None:
     if dataset is None:
         return None
+
     title_lc = title.lower().strip()
     names = dataset["track_name"].str.lower().str.strip()
+
     mask = names == title_lc
     if mask.any():
         return dataset[mask].iloc[0].to_dict()
+
     mask = names.str.contains(title_lc, na=False, regex=False)
     if mask.any():
         return dataset[mask].iloc[0].to_dict()
-    return None
 
+    return None
 
 @app.get("/status")
 def status():
@@ -431,34 +532,173 @@ def fusion_metrics():
 
 @app.post("/debate")
 def run_debate(req: DebateRequest):
-    if debate_orchestrator is None:
-        return JSONResponse(
-            {"error": "Agents not loaded. Run: python train_text_agent.py && python train_audio_agent.py"},
-            status_code=503,
-        )
-
+    # ── 1. Find song locally first ────────────────────────────────────────────
     song = find_song(req.song_title)
+
+    # ── 2. Live fallback: fetch from Genius + Spotify if not in dataset ──────
     if song is None:
-        return JSONResponse(
-            {"error": f'"{req.song_title}" not found in dataset. Try a Taylor Swift song title.'},
-            status_code=404,
-        )
+        if genius_collector is None or spotify_collector is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        f'"{req.song_title}" not found in local dataset '
+                        "and live API lookup is not configured."
+                    )
+                },
+                status_code=404,
+            )
+
+        lyrics = genius_collector.fetch_lyrics(req.song_title, req.artist)
+        if not lyrics:
+            return JSONResponse(
+                {
+                    "error": (
+                        f'Lyrics for "{req.song_title}" by {req.artist} '
+                        "could not be fetched from Genius."
+                    )
+                },
+                status_code=404,
+            )
+
+        audio_features = spotify_collector.get_track_features(req.song_title, req.artist)
+        if not audio_features:
+            return JSONResponse(
+                {
+                    "error": (
+                        f'Audio features for "{req.song_title}" by {req.artist} '
+                        "could not be fetched from Spotify."
+                    )
+                },
+                status_code=404,
+            )
+
+        song = {
+            **audio_features,
+            "track_name": req.song_title,
+            "artist": req.artist,
+            "lyrics": lyrics,
+        }
+
+        print(f"[api] Live fetch: '{req.song_title}' by {req.artist}")
+
+    # ── 3. Make sure lyrics exist ─────────────────────────────────────────────
+    if "lyrics" not in song or pd.isna(song.get("lyrics")):
+        song["lyrics"] = song.get("lyric", "")
 
     lyrics = str(song.get("lyrics", "")).strip()
     if not lyrics:
-        return JSONResponse({"error": "No lyrics found for this song."}, status_code=404)
+        return JSONResponse(
+            {"error": f'No lyrics found for "{req.song_title}".'},
+            status_code=404,
+        )
 
     try:
+        # ── 4. Real early fusion: one trained joint model ─────────────────────
         if req.fusion == "early":
+            if early_fusion_agent is None:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "EarlyFusionAgent not loaded. "
+                            "Run: python train_early_fusion_agent.py"
+                        )
+                    },
+                    status_code=503,
+                )
+
             start_time = time.perf_counter()
-            ta_res = text_agent.predict_with_evidence(lyrics)
-            au_features = {f: song.get(f, 0) for f in audio_agent.features}
-            au_res = audio_agent.predict_with_evidence(au_features)
+
+            ef_features = {
+                f: song.get(f, 0)
+                for f in early_fusion_agent.audio_features
+            }
+
+            ef_res = early_fusion_agent.predict_with_evidence(
+                lyrics=lyrics,
+                audio_data=ef_features,
+            )
+
             elapsed = time.perf_counter() - start_time
-            response_data = debate_orchestrator.run_early_fusion(ta_res, au_res, song, elapsed)
-        else:
-            response_data = debate_orchestrator.run_late_fusion_debate(song)
+
+            predicted = ef_res["predicted_era"]
+            confidence = float(ef_res["probabilities"].get(predicted, 0))
+            top3 = ef_res["evidence"].get("top3_candidates", [])
+
+            top3_text = ", ".join(
+                f"{era} ({prob:.0%})"
+                for era, prob in top3
+            ) or "—"
+
+            meta = ERAS_META.get(
+                predicted,
+                {
+                    "id": "midnights",
+                    "label": predicted,
+                    "color": "#4a5aa8",
+                },
+            )
+
+            response_data = {
+                "id": "live",
+                "title": song.get("track_name", req.song_title),
+                "artist": song.get("artist", req.artist),
+                "era": meta["id"],
+                "audioConf": round(confidence, 2),
+                "lyricConf": round(confidence, 2),
+                "stacking": round(confidence, 2),
+                "badge": "joint-inference",
+                "reason": ef_res["reasoning"],
+                "rounds": 1,
+                "runtime": elapsed,
+                "audioFinal": "Included in joint vector",
+                "lyricFinal": f"{predicted} — {confidence:.0%}",
+                "script": [
+                    {"who": "sys", "text": "── EARLY FUSION MODE: REAL JOINT MODEL ──"},
+                    {"who": "lyric", "text": "> Extracting TF-IDF lyric features..."},
+                    {"who": "lyric", "text": "> Scaling Spotify audio features..."},
+                    {"who": "sys", "text": "> CONCATENATING TEXT + AUDIO FEATURES INTO ONE VECTOR..."},
+                    {
+                        "who": "lyric",
+                        "text": "> Running trained early-fusion classifier...",
+                        "cls": "is-emphatic",
+                    },
+                    {"who": "lyric", "text": f"> Top candidates: {top3_text}"},
+                    {
+                        "who": "lyric",
+                        "text": f"> Early fusion prediction: <emp>{predicted} — {confidence:.0%}</emp>",
+                        "cls": "is-resolve",
+                    },
+                    {"who": "sys", "text": "── INFERENCE REASONING ──"},
+                    {
+                        "who": "lyric",
+                        "text": f"> {ef_res['reasoning']}",
+                        "cls": "is-emphatic",
+                    },
+                    {
+                        "who": "lyric",
+                        "text": "> Single joint-model inference complete.",
+                        "cls": "is-resolve",
+                    },
+                ],
+            }
+
+            return JSONResponse(response_data)
+
+        # ── 5. Late fusion: use friend's DebateOrchestrator ──────────────────
+        if debate_orchestrator is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Agents not loaded. "
+                        "Run: python train_text_agent.py && python train_audio_agent.py"
+                    )
+                },
+                status_code=503,
+            )
+
+        response_data = debate_orchestrator.run_late_fusion_debate(song)
         return JSONResponse(response_data)
+
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

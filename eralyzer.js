@@ -56,7 +56,7 @@
         lyricBox.style.width = "100%";
         lyricHeader.textContent = "● EARLY FUSION MODEL";
         lyricHeader.style.color = "var(--ink)";
-        lyricMeta.textContent = "tfidf + spotify_features · gradient_boost · n=4096";
+        lyricMeta.textContent = "";
         lyricModel.textContent = "fusion-xgb-v1.0";
       } else {
         audioBox.style.display = "";
@@ -65,7 +65,7 @@
         lyricBox.style.width = "";
         lyricHeader.textContent = "● LYRIC AGENT";
         lyricHeader.style.color = "";
-        lyricMeta.textContent = "tf-idf + bert-base · n=4096";
+        lyricMeta.textContent = "";
         lyricModel.textContent = "lyric-bert-v2.4";
       }
     });
